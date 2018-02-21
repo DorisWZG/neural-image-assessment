@@ -1,14 +1,14 @@
 import argparse
 import csv
-
 import numpy as np
 from path import Path
 from tqdm import tqdm
-
+from multiprocessing.dummy import Pool
 from config import weights_file
 from nasnet_model import *
 from utils.image_utils import preprocess_for_evaluation
 from utils.score_utils import mean_score, std_score
+
 
 parser = argparse.ArgumentParser(
     description='Evaluate NIMA(NASNet mobile)')
@@ -26,6 +26,7 @@ if args.dir is not None:
     imgs = Path(args.dir).files('*.png')
     imgs += Path(args.dir).files('*.jpg')
     imgs += Path(args.dir).files('*.jpeg')
+    imgs += Path(args.dir).files('*.bmp')
 
 elif args.img[0] is not None:
     print("Loading images from path(s) : ", args.img)
@@ -40,21 +41,38 @@ nima_model = NimaModel()
 model = nima_model.model
 model.load_weights(weights_file)
 
+def batch(iterable, n=1):
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx:min(ndx + n, l)]
+
+batch_size = 512
 # calculate scores
 scored_images = []
-for img_path in tqdm(imgs):
-    try:
-        x = preprocess_for_evaluation(img_path)
-    except OSError as e:
-        print("Couldn't process {}".format(img_path))
-        print(e)
-        continue
-    x = np.expand_dims(x, axis=0)
-    scores = model.predict(x, batch_size=1, verbose=0)[0]
 
-    mean = mean_score(scores)
-    std = std_score(scores)
-    scored_images.append((mean, std, img_path))
+
+pool = Pool()
+for batch in tqdm(batch(imgs, batch_size), total=len(imgs)//batch_size+1):
+    try:
+        images = pool.map(preprocess_for_evaluation, batch)
+    except OSError as e:
+        images = []
+        new_batch = []
+        for img_path in batch:
+            try:
+                images.append(preprocess_for_evaluation(img_path))
+                new_batch.append(img_path)
+            except OSError as e:
+                print("Couldn't process {}".format(img_path))
+                print(e)
+                continue
+        batch = new_batch
+    x = np.array(images)
+    scores = model.predict(x, batch_size=x.shape[0], verbose=0)
+    means = mean_score(scores)
+    stds = std_score(scores)
+    for mean, std, img_path in zip(means, stds, batch):
+        scored_images.append((mean, std, img_path))
 scored_images = sorted(scored_images, reverse=True)
 
 # write results to csv file
